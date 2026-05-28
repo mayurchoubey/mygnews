@@ -66,11 +66,17 @@ def cache_key(params: dict[str, Any]) -> str:
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
-def cache_get(key: str) -> Optional[dict]:
+def cache_get(key: str) -> Optional[Any]:
     with _cache_lock:
         return _cache.get(key)
 
 
-def cache_set(key: str, value: dict) -> None:
+def cache_set(key: str, value: Any) -> None:
     with _cache_lock:
         _cache[key] = value
+
+
+def feed_key(q: str, gl: Optional[str], hl: Optional[str]) -> str:
+    # keyed on the query only (not start/num) so every page of a query
+    # reuses a single Firecrawl scrape.
+    return cache_key({"q": q, "gl": gl, "hl": hl})

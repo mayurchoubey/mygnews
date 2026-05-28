@@ -9,9 +9,9 @@ from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
 
 from . import normalize, resolve
-from .cache import CreditCeilingExceeded, cache_get, cache_key, cache_set, credit_meter
+from .cache import CreditCeilingExceeded, cache_get, cache_set, credit_meter, feed_key
 from .firecrawl_client import FirecrawlError, build_news_url, scrape_html
-from .models import NewsResponse, SearchMetadata, SearchParameters
+from .models import NewsResponse, ParsedItem, SearchMetadata, SearchParameters
 from .parser import parse
 
 app = FastAPI(title="OT News API", version="0.1.0")
@@ -44,20 +44,6 @@ def search(
     params = SearchParameters(
         engine=engine, q=q, tbm=tbm, gl=gl, hl=hl, start=start, num=num
     )
-    key = cache_key(params.model_dump())
-
-    if not no_cache:
-        hit = cache_get(key)
-        if hit is not None:
-            hit = dict(hit)
-            meta = dict(hit["search_metadata"])
-            meta["cached"] = True
-            meta["id"] = search_id
-            meta["processed_at"] = _now()
-            hit["search_metadata"] = meta
-            return JSONResponse(hit)
-
-    url = build_news_url(q=q, gl=gl, hl=hl)
 
     def _error(message: str, status_code: int = 502) -> JSONResponse:
         meta = SearchMetadata(
@@ -73,21 +59,39 @@ def search(
             body.model_dump(exclude_none=True), status_code=status_code
         )
 
-    try:
-        html = scrape_html(url, country=(gl or "US").upper(), languages=[f"{hl or 'en'}-{(gl or 'US').upper()}"])
-        items, mode = parse(html, url)
-    except CreditCeilingExceeded as exc:
-        return _error(str(exc), status_code=429)
-    except FirecrawlError as exc:
-        return _error(str(exc), status_code=502)
+    # The full result feed is cached per query (q/gl/hl); every page slices
+    # from it, so paginating a query never re-scrapes Firecrawl.
+    fkey = feed_key(q, gl, hl)
+    cached_feed = None if no_cache else cache_get(fkey)
 
-    # news.google.com returns the full feed in one page; paginate locally,
-    # then resolve only this page's links to publisher URLs.
-    page = items[start : start + num]
+    if cached_feed is not None:
+        feed = [ParsedItem(**d) for d in cached_feed["items"]]
+        mode = cached_feed["mode"]
+        from_cache = True
+    else:
+        url = build_news_url(q=q, gl=gl, hl=hl)
+        country = (gl or "US").upper()
+        try:
+            html = scrape_html(
+                url, country=country, languages=[f"{hl or 'en'}-{country}"]
+            )
+            feed, mode = parse(html, url)
+        except CreditCeilingExceeded as exc:
+            return _error(str(exc), status_code=429)
+        except FirecrawlError as exc:
+            return _error(str(exc), status_code=502)
+        cache_set(
+            fkey,
+            {"mode": mode, "items": [it.model_dump() for it in feed]},
+        )
+        from_cache = False
+
+    # Slice the requested page and resolve only its links to publisher URLs
+    # (copy so the cached feed keeps original google redirect links).
+    page = [it.model_copy() for it in feed[start : start + num]]
     mapping = resolve.resolve_many([it.link for it in page])
     for it in page:
         it.link = mapping.get(it.link, it.link)
-    items = page
 
     meta = SearchMetadata(
         id=search_id,
@@ -96,9 +100,7 @@ def search(
         processed_at=_now(),
         total_time_taken=round(time.perf_counter() - started, 3),
         parse_mode=mode,
-        cached=False,
+        cached=from_cache,
     )
-    response = normalize.build_response(items=items, params=params, metadata=meta)
-    payload = response.model_dump(exclude_none=True)
-    cache_set(key, payload)
-    return JSONResponse(payload)
+    response = normalize.build_response(items=page, params=params, metadata=meta)
+    return JSONResponse(response.model_dump(exclude_none=True))
