@@ -67,15 +67,18 @@ def _page_link(params: SearchParameters, page: int) -> str:
     return f"/search?{urlencode({k: v for k, v in q.items() if v is not None})}"
 
 
+# Google's footer shows a bounded window of pages, not the full range.
+_PAGE_WINDOW = 10
+
+
 def build_pagination(
     params: SearchParameters, page: int, total: int, page_size: int
 ) -> Pagination:
     last_page = max(1, (total + page_size - 1) // page_size)
     nxt = _page_link(params, page + 1) if page < last_page else None
-    others: dict[str, str] = {}
-    for p in range(1, last_page + 1):
-        if p != page:
-            others[str(p)] = _page_link(params, p)
+    lo = max(1, page - _PAGE_WINDOW // 2)
+    hi = min(last_page, lo + _PAGE_WINDOW - 1)
+    others = {str(p): _page_link(params, p) for p in range(lo, hi + 1) if p != page}
     return Pagination(
         current=page,
         next=nxt,

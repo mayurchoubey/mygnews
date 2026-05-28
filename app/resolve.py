@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
@@ -72,23 +73,28 @@ def _decode_one(client: httpx.Client, google_url: str) -> str:
     return json.loads(parsed[0][2])[1]
 
 
-def _resolve(client: httpx.Client, google_url: str) -> str:
+def _resolve(client: httpx.Client, google_url: str, attempts: int = 2) -> str:
     if not _is_gnews_link(google_url):
         return google_url
     with _lock:
         cached = _cache.get(google_url)
     if cached:
         return cached
-    try:
-        publisher = _decode_one(client, google_url)
-    except Exception:
-        return google_url  # graceful fallback: keep the Google link
-    with _lock:
-        _cache[google_url] = publisher
-    return publisher
+    for attempt in range(attempts):
+        try:
+            publisher = _decode_one(client, google_url)
+        except Exception:
+            if attempt + 1 < attempts:
+                time.sleep(0.4 * (attempt + 1))
+                continue
+            return google_url  # graceful fallback: keep the Google link
+        with _lock:
+            _cache[google_url] = publisher
+        return publisher
+    return google_url
 
 
-def resolve_many(urls: list[str], max_workers: int = 8) -> dict[str, str]:
+def resolve_many(urls: list[str], max_workers: int = 5) -> dict[str, str]:
     """Map each google news link to its publisher URL (or itself on failure)."""
     if not urls:
         return {}
