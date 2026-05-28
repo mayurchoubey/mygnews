@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Optional
+from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup, Tag
 
@@ -51,6 +52,22 @@ def _source_name(card: Tag) -> Optional[str]:
     return el.get_text(strip=True) if isinstance(el, Tag) else None
 
 
+def _path_token(href: str, segment: str) -> Optional[str]:
+    parts = [p for p in urlparse(href).path.split("/") if p]
+    if len(parts) >= 2 and parts[0] == segment:
+        return parts[1]
+    return None
+
+
+def _story_token(card: Tag) -> Optional[str]:
+    """Best-effort: a /stories/ link inside the tight card = its cluster token."""
+    for a in card.find_all("a", href=True):
+        tok = _path_token(str(a.get("href", "")), "stories")
+        if tok:
+            return tok
+    return None
+
+
 def _icons(card: Tag) -> tuple[Optional[str], Optional[str]]:
     source_icon: Optional[str] = None
     thumbnail: Optional[str] = None
@@ -93,6 +110,28 @@ def parse(html: str) -> list[ParsedItem]:
                 date=human_date,
                 iso_date=iso_date,
                 thumbnail=thumbnail,
+                story_token=_story_token(card),
             )
         )
     return items
+
+
+def parse_menu(html: str) -> list[tuple[str, str]]:
+    """Extract the topic navigation as (title, topic_token) pairs.
+
+    Best-effort: only nav entries that render with text are captured (the
+    icon-only / deferred entries are skipped).
+    """
+    soup = BeautifulSoup(html, "lxml")
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for a in soup.find_all("a", href=True):
+        token = _path_token(str(a.get("href", "")), "topics")
+        if not token or token in seen:
+            continue
+        title = a.get_text(" ", strip=True) or a.get("aria-label")
+        if not title:
+            continue
+        seen.add(token)
+        out.append((str(title), token))
+    return out

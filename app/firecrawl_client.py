@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any, Optional
 from urllib.parse import urlencode
 
@@ -27,22 +28,43 @@ class FirecrawlError(RuntimeError):
     pass
 
 
+GOOGLE_NEWS_HOST = "https://news.google.com"
+
+
 def build_news_url(
-    q: str,
+    q: Optional[str] = None,
     gl: Optional[str] = None,
     hl: Optional[str] = None,
-) -> str:
-    # news.google.com loads the full result feed in one page; pagination
-    # (start/num) is applied locally rather than via URL params.
+    topic_token: Optional[str] = None,
+    publication_token: Optional[str] = None,
+    story_token: Optional[str] = None,
+    section_token: Optional[str] = None,
+) -> tuple[str, str]:
+    """Return (url, engine) for the requested news.google.com surface.
+
+    Precedence mirrors SerpApi: story > publication > topic(+section) > query >
+    headlines. news.google.com loads the full feed in one page; pagination is
+    applied locally.
+    """
     country = (gl or "US").upper()
     lang = hl or "en"
-    params: dict[str, Any] = {
-        "q": q,
-        "hl": lang,
-        "gl": country,
-        "ceid": f"{country}:{lang}",
-    }
-    return f"{GOOGLE_NEWS_BASE}?{urlencode(params)}"
+    locale = {"hl": lang, "gl": country, "ceid": f"{country}:{lang}"}
+
+    if story_token:
+        path, engine = f"/stories/{story_token}", "story"
+    elif publication_token:
+        path, engine = f"/publications/{publication_token}", "publication"
+    elif topic_token:
+        engine = "topic"
+        path = f"/topics/{topic_token}"
+        if section_token:
+            path += f"/sections/{section_token}"
+    elif q:
+        return f"{GOOGLE_NEWS_BASE}?{urlencode({'q': q, **locale})}", "search"
+    else:
+        path, engine = "/home", "headlines"
+
+    return f"{GOOGLE_NEWS_HOST}{path}?{urlencode(locale)}", engine
 
 
 def _credit_cost(fmt: str) -> int:
@@ -50,30 +72,40 @@ def _credit_cost(fmt: str) -> int:
     return _CREDIT_COST.get((fmt, proxy), 5)
 
 
-def _post_scrape(body: dict[str, Any]) -> dict[str, Any]:
+# Transient Firecrawl statuses worth retrying (timeouts, rate limits, 5xx).
+_RETRYABLE = {408, 429, 500, 502, 503, 504}
+
+
+def _post_scrape(body: dict[str, Any], attempts: int = 3) -> dict[str, Any]:
     settings = get_settings()
     headers = {
         "Authorization": f"Bearer {settings.firecrawl_api_key}",
         "Content-Type": "application/json",
     }
-    try:
-        resp = httpx.post(
-            f"{FIRECRAWL_BASE}/scrape",
-            headers=headers,
-            json=body,
-            timeout=settings.request_timeout_seconds + 10,
-        )
-    except httpx.HTTPError as exc:
-        raise FirecrawlError(f"request to Firecrawl failed: {exc}") from exc
-
-    if resp.status_code != 200:
-        raise FirecrawlError(
-            f"Firecrawl returned {resp.status_code}: {resp.text[:300]}"
-        )
-    payload = resp.json()
-    if not payload.get("success"):
-        raise FirecrawlError(f"Firecrawl error: {payload}")
-    return payload.get("data", {})
+    last_err = "unknown error"
+    for attempt in range(attempts):
+        try:
+            resp = httpx.post(
+                f"{FIRECRAWL_BASE}/scrape",
+                headers=headers,
+                json=body,
+                timeout=settings.request_timeout_seconds + 15,
+            )
+        except httpx.HTTPError as exc:
+            last_err = f"request to Firecrawl failed: {exc}"
+        else:
+            if resp.status_code == 200:
+                payload = resp.json()
+                if payload.get("success"):
+                    return payload.get("data", {})
+                last_err = f"Firecrawl error: {payload}"
+            else:
+                last_err = f"Firecrawl returned {resp.status_code}: {resp.text[:300]}"
+                if resp.status_code not in _RETRYABLE:
+                    break
+        if attempt + 1 < attempts:
+            time.sleep(1.5 * (attempt + 1))
+    raise FirecrawlError(last_err)
 
 
 def scrape_html(

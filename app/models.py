@@ -17,6 +17,7 @@ class ParsedItem(BaseModel):
     iso_date: Optional[str] = None      # ISO 8601, used for sort/time filters
     snippet: Optional[str] = None
     thumbnail: Optional[str] = None
+    story_token: Optional[str] = None   # full-coverage cluster token (best-effort)
 
 
 # ---- SearchApi-shaped response (google_news engine) -----------------------

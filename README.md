@@ -1,38 +1,52 @@
-# mygnews — a SearchApi-compatible Google News API
+# mygnews — a SerpApi-compatible Google News API
 
-A small, self-hosted news search API whose request parameters and JSON response
-mirror [SearchApi.io](https://www.searchapi.io/google-news)'s `google_news`
-engine, so existing SearchApi clients can point at it with minimal changes.
+A self-hosted Google News API whose request parameters and JSON response mirror
+[SerpApi](https://serpapi.com/google-news-api)'s `google_news` engine, so
+existing SerpApi clients can point at it with minimal changes.
 
 It scrapes `news.google.com` through [Firecrawl](https://firecrawl.dev)
 (JS rendering + stealth proxy), parses the result feed, resolves each article
-to its **real publisher URL**, and serves a SearchApi-shaped response.
+to its **real publisher URL**, and serves a SerpApi-shaped response.
+
+A SearchApi.io-shaped response is also available via `?output=searchapi`.
 
 ## Why Firecrawl + news.google.com
 
 - A direct request to Google returns `403`/CAPTCHA without proxy and anti-bot
   handling. Firecrawl renders JS and rotates proxies to get clean HTML.
-- SearchApi's `google_news` engine is built on the classic web SERP
-  (`google.com/search?tbm=nws`), which is **hard-blocked** even through a
-  stealth proxy (it consistently returns Google's "unusual traffic" CAPTCHA).
-  So mygnews matches the SearchApi **API surface** while sourcing data from
-  `news.google.com`, which renders reliably.
+- The classic web SERP (`google.com/search?tbm=nws`) is **hard-blocked** even
+  through a stealth proxy (it returns Google's "unusual traffic" CAPTCHA), so
+  data is sourced from `news.google.com`, which renders reliably.
+
+## Engines
+
+The engine is chosen by which parameter you pass (precedence top to bottom):
+
+| Pass… | Engine | news.google.com surface |
+|-------|--------|--------------------------|
+| `story_token` | full-coverage story | `/stories/{token}` |
+| `publication_token` | a publication's feed | `/publications/{token}` |
+| `topic_token` (+ `section_token`) | a topic / subsection | `/topics/{token}[/sections/{s}]` |
+| `q` | keyword search | `/search?q=…` |
+| _(none)_ | top headlines | `/home` |
+
+Tokens are discovered from `menu_links` (topic nav) and from `news_results[].story_token`
+in any response — pass them back to drill in, just like SerpApi.
 
 ## Features
 
-- **SearchApi-shaped response** — `search_metadata`, `search_parameters`,
-  `search_information`, `organic_results`, `top_stories`, `pagination`.
+- **SerpApi-shaped response** — `search_metadata`, `search_parameters`,
+  `news_results` (`source: {name, icon}`, `thumbnail`, `date`, `story_token`),
+  `menu_links`, `serpapi_pagination`.
 - **Publisher URLs** — Google's signed redirect links are decoded to the
   source URL via Google's `batchexecute` RPC (plain HTTP, no Firecrawl credits),
   resolved in parallel and cached, with graceful fallback to the Google link.
-- **Time filtering** — `time_period` (last_hour…last_year) and
-  `time_period_min`/`max` (`MM/DD/YYYY`), applied via Google date operators and
-  guaranteed client-side against each result's `iso_date`.
-- **Sorting** — `sort_by=most_recent` reorders by `iso_date`.
-- **Hybrid parser** — fast deterministic CSS selectors, with a Firecrawl
-  LLM-extract fallback only when selectors miss (DOM-churn resilience).
-- **Cost controls** — the parsed feed is cached per query, so sort/page/filter
-  variations never re-scrape; a daily Firecrawl credit ceiling guards the budget.
+- **Time filtering** (`time_period`, `time_period_min`/`max`) and **sorting**
+  (`sort_by=most_recent`), applied against each result's date.
+- **Hybrid parser** — deterministic CSS selectors with a Firecrawl LLM-extract
+  fallback when selectors miss; transient scrape failures are retried.
+- **Cost controls** — per-query feed cache (sort/page/filter reuse one scrape)
+  and a daily Firecrawl credit ceiling.
 
 ## Setup
 
@@ -50,64 +64,65 @@ cp .env.example .env   # then put your Firecrawl key in FIRECRAWL_API_KEY
 uvicorn app.main:app --reload --port 8000
 ```
 
-## Example
+## Examples
 
 ```bash
-curl "http://localhost:8000/search?q=tesla&gl=us&hl=en&num=5&sort_by=most_recent"
+curl "http://localhost:8000/search?q=openai&gl=us&hl=en"          # keyword search
+curl "http://localhost:8000/search?gl=us&hl=en"                   # top headlines
+curl "http://localhost:8000/search?topic_token=CAAq...&gl=us"     # browse a topic
+curl "http://localhost:8000/search?story_token=CAAq...&gl=us"     # full coverage
+curl "http://localhost:8000/search?q=openai&output=searchapi"     # SearchApi shape
 ```
 
 ```jsonc
 {
   "search_metadata": {
     "id": "…", "status": "Success",
-    "request_time_taken": 7.18, "parsing_time_taken": 0.06,
-    "total_time_taken": 8.4, "request_url": "https://news.google.com/search?…",
+    "total_time_taken": 8.4,
+    "google_news_url": "https://news.google.com/search?q=openai&…",
     "provider": "firecrawl", "parse_mode": "selectors", "cached": false
   },
-  "search_parameters": { "engine": "google_news", "q": "tesla",
-                         "gl": "us", "hl": "en", "device": "desktop",
-                         "sort_by": "most_recent", "page": 1 },
-  "search_information": { "query_displayed": "tesla", "total_results": 105,
-                          "detected_location": "US" },
-  "organic_results": [
+  "search_parameters": { "engine": "google_news", "q": "openai", "gl": "us", "hl": "en" },
+  "news_results": [
     {
       "position": 1,
-      "title": "Tesla autopilot sinks in pond …",
-      "link": "https://www.fox13news.com/news/tesla-autopilot-…",
-      "source": "FOX 13 Tampa Bay",
-      "date": "2 hours ago",
-      "iso_date": "2026-05-28T08:39:02Z",
-      "favicon": "https://…/faviconV2?url=…",
-      "thumbnail": "https://news.google.com/api/attachments/…"
+      "title": "OpenAI Foundation commits $250 million …",
+      "source": { "name": "Reuters", "icon": "https://…/faviconV2?url=…" },
+      "link": "https://www.reuters.com/business/openai-foundation-commits-…",
+      "thumbnail": "https://news.google.com/api/attachments/…",
+      "date": "17 hours ago"
     }
   ],
-  "top_stories": [ { "position": 1, "title": "…", "link": "…", "source": "…" } ],
-  "pagination": { "current": 1, "next": "/search?…&page=2",
-                  "other_pages": { "2": "/search?…&page=2", "3": "…" } }
+  "menu_links": [
+    { "title": "World", "topic_token": "CAAq…",
+      "serpapi_link": "/search?engine=google_news&topic_token=CAAq…&gl=us&hl=en" }
+  ],
+  "serpapi_pagination": { "current": 1, "next": "/search?…&page=2",
+                          "other_pages": { "2": "…", "3": "…" } }
 }
 ```
 
-## Request parameters (SearchApi `google_news` compatible)
+## Request parameters
 
-| Param             | Default   | Description                                            |
-|-------------------|-----------|--------------------------------------------------------|
-| `q`               | —         | Query (required); supports `site:`, `when:`, `after:`, `before:` |
-| `gl`              | `us`      | Country code                                           |
-| `hl`              | `en`      | Interface language                                     |
-| `location`        | —         | Canonical location (echoed as `location_used`)         |
-| `uule`            | —         | Google-encoded location                                |
-| `lr`              | —         | Document language, e.g. `lang_en`                      |
-| `cr`              | —         | Country restriction, e.g. `countryUS`                  |
-| `device`          | `desktop` | `desktop` \| `mobile` \| `tablet`                      |
-| `time_period`     | —         | `last_hour` \| `last_day` \| `last_week` \| `last_month` \| `last_year` |
-| `time_period_min` | —         | Start date `MM/DD/YYYY`                                |
-| `time_period_max` | —         | End date `MM/DD/YYYY`                                   |
-| `sort_by`         | relevance | `most_recent`                                          |
-| `nfpr`            | —         | `1` to exclude auto-corrected results                  |
-| `filter`          | —         | `0` to disable dedup / host-crowding                   |
-| `page`            | `1`       | 1-based page number                                    |
-| `num`             | `10`      | Results per page (extension; 1–100)                    |
-| `no_cache`        | `false`   | Bypass the feed cache and force a fresh scrape         |
+| Param               | Default   | Description                                       |
+|---------------------|-----------|---------------------------------------------------|
+| `q`                 | —         | Query (omit for headlines); supports `site:`, `when:`, `after:`, `before:` |
+| `topic_token`       | —         | Browse a topic                                    |
+| `publication_token` | —         | Browse a publication's feed                       |
+| `story_token`       | —         | Full coverage of a story                          |
+| `section_token`     | —         | A subsection of a topic                           |
+| `gl`                | `us`      | Country code                                      |
+| `hl`                | `en`      | Interface language                                |
+| `location`, `uule`, `lr`, `cr` | — | Accepted and echoed (best-effort geo/lang)   |
+| `device`            | `desktop` | `desktop` \| `mobile` \| `tablet`                 |
+| `time_period`       | —         | `last_hour` … `last_year`                         |
+| `time_period_min`/`max` | —     | `MM/DD/YYYY`                                       |
+| `sort_by`           | relevance | `most_recent`                                     |
+| `nfpr`, `filter`    | —         | Accepted and echoed                               |
+| `page`              | `1`       | 1-based page number                               |
+| `num`               | `10`      | Results per page (extension; 1–100)               |
+| `output`            | `serpapi` | `serpapi` \| `searchapi`                          |
+| `no_cache`          | `false`   | Bypass the feed cache                             |
 
 `GET /health` reports liveness and `credits_used_today`.
 
@@ -122,16 +137,14 @@ curl "http://localhost:8000/search?q=tesla&gl=us&hl=en&num=5&sort_by=most_recent
 
 ## Parity notes & caveats
 
-- **Data source differs.** mygnews matches SearchApi's `google_news` parameters
-  and response schema, but data comes from `news.google.com` (the `tbm=nws`
-  SERP is unscrapeable). Result sets and ordering will not be byte-identical.
-- **`snippet` is usually absent.** news.google.com search cards carry no
-  description text, so `organic_results[].snippet` is typically omitted. The
-  field is supported when the LLM-extract fallback recovers it.
-- **`html_url`/`json_url`** are not provided — raw artifacts aren't persisted.
-- **Token-based modes** (`topic_token`, `publication_token`, `story_token`,
-  `section_token`) belong to SearchApi's separate `google_news_portal` engine,
-  not `google_news`, so they are out of scope here.
-- Scraping Google is against its Terms of Service; use accordingly. Selector
-  classes change over time (the LLM fallback covers churn at extra credit cost),
-  and publisher-URL resolution makes a couple of cached requests per article.
+- **Data source differs.** Parameters and response schema match SerpApi's
+  `google_news`, but data comes from `news.google.com` (the `tbm=nws` SERP is
+  unscrapeable). Result sets and ordering won't be byte-identical.
+- **`menu_links` and per-result `story_token` are best-effort** — the topic nav
+  and cluster tokens render only on `/home` and topic pages (not keyword search),
+  and only entries that render with text are captured.
+- **No `snippet`** — news.google.com cards carry no description text (SerpApi's
+  news engine usually omits it too).
+- **Scale**: in-memory single-process cache; publisher-URL resolution makes a
+  couple of cached requests per article and can rate-limit under heavy traffic.
+- Scraping Google is against its Terms of Service; use accordingly.
