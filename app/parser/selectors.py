@@ -36,12 +36,14 @@ def _card_for(anchor: Tag) -> Tag:
     return card
 
 
-def _date(card: Tag) -> Optional[str]:
+def _dates(card: Tag) -> tuple[Optional[str], Optional[str]]:
+    """Return (human_readable, iso) from the card's <time> element."""
     t = card.find("time")
     if not isinstance(t, Tag):
-        return None
-    # prefer the human-readable relative string, like SerpApi ("17 hours ago")
-    return t.get_text(strip=True) or t.get("datetime")
+        return None, None
+    human = t.get_text(strip=True) or None
+    iso = t.get("datetime") or None
+    return human, (str(iso) if iso else None)
 
 
 def _source_name(card: Tag) -> Optional[str]:
@@ -80,14 +82,16 @@ def parse(html: str) -> list[ParsedItem]:
         seen.add(link)
 
         card = _card_for(anchor)
-        source_icon, thumbnail = _icons(card)
+        favicon, thumbnail = _icons(card)
+        human_date, iso_date = _dates(card)
         items.append(
             ParsedItem(
                 title=title,
                 link=link,
-                source_name=_source_name(card),
-                source_icon=source_icon,
-                date=_date(card),
+                source=_source_name(card),
+                favicon=favicon,
+                date=human_date,
+                iso_date=iso_date,
                 thumbnail=thumbnail,
             )
         )

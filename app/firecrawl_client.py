@@ -80,6 +80,7 @@ def scrape_html(
     url: str,
     country: str = "US",
     languages: Optional[list[str]] = None,
+    mobile: bool = False,
 ) -> str:
     """Render the page and return raw HTML.
 
@@ -95,6 +96,7 @@ def scrape_html(
         "timeout": settings.request_timeout_seconds * 1000,
         "onlyMainContent": False,
         "waitFor": 3000,
+        "mobile": mobile,
         "location": {
             "country": country,
             "languages": languages or ["en-US"],

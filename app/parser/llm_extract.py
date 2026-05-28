@@ -51,7 +51,7 @@ def parse(url: str) -> list[ParsedItem]:
             ParsedItem(
                 title=title,
                 link=link,
-                source_name=row.get("source") or None,
+                source=row.get("source") or None,
                 date=row.get("date") or None,
                 snippet=row.get("snippet") or None,
                 thumbnail=row.get("thumbnail") or None,

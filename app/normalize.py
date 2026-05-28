@@ -5,70 +5,101 @@ from urllib.parse import urlencode, urlparse
 
 from .models import (
     NewsResponse,
-    NewsResult,
+    OrganicResult,
     Pagination,
     ParsedItem,
+    SearchInformation,
     SearchMetadata,
     SearchParameters,
-    Source,
+    TopStory,
 )
 
 
-def _favicon(link: str) -> Optional[str]:
-    domain = urlparse(link).netloc
-    if not domain:
-        return None
-    return f"https://www.google.com/s2/favicons?domain={domain}&sz=64"
+def _favicon(item: ParsedItem) -> Optional[str]:
+    if item.favicon:
+        return item.favicon
+    domain = urlparse(item.link).netloc
+    return f"https://www.google.com/s2/favicons?domain={domain}&sz=64" if domain else None
 
 
-def to_news_results(items: list[ParsedItem], start: int) -> list[NewsResult]:
-    results: list[NewsResult] = []
+def to_organic_results(items: list[ParsedItem], start: int) -> list[OrganicResult]:
+    out: list[OrganicResult] = []
     for i, it in enumerate(items):
-        results.append(
-            NewsResult(
+        out.append(
+            OrganicResult(
                 position=start + i + 1,
                 title=it.title,
                 link=it.link,
-                source=Source(
-                    name=it.source_name,
-                    icon=it.source_icon or _favicon(it.link),
-                ),
+                source=it.source,
                 date=it.date,
+                iso_date=it.iso_date,
                 snippet=it.snippet,
+                favicon=_favicon(it),
                 thumbnail=it.thumbnail,
             )
         )
-    return results
+    return out
 
 
-def _pagination(params: SearchParameters, result_count: int) -> Optional[Pagination]:
-    start = params.start or 0
-    num = params.num or 10
-    if result_count < num:
-        return Pagination(current=(start // num) + 1)
-    next_start = start + num
-    next_params = {"q": params.q, "tbm": "nws", "start": next_start, "num": num}
-    if params.gl:
-        next_params["gl"] = params.gl
-    if params.hl:
-        next_params["hl"] = params.hl
+def to_top_stories(items: list[ParsedItem]) -> list[TopStory]:
+    out: list[TopStory] = []
+    for i, it in enumerate(items):
+        out.append(
+            TopStory(
+                position=i + 1,
+                title=it.title,
+                link=it.link,
+                source=it.source,
+                date=it.date,
+                iso_date=it.iso_date,
+                thumbnail=it.thumbnail,
+            )
+        )
+    return out
+
+
+def _page_link(params: SearchParameters, page: int) -> str:
+    q: dict[str, object] = {"engine": "google_news", "q": params.q, "page": page}
+    for k in ("gl", "hl", "location", "device", "time_period", "sort_by"):
+        v = getattr(params, k)
+        if v:
+            q[k] = v
+    return f"/search?{urlencode({k: v for k, v in q.items() if v is not None})}"
+
+
+def build_pagination(
+    params: SearchParameters, page: int, total: int, page_size: int
+) -> Pagination:
+    last_page = max(1, (total + page_size - 1) // page_size)
+    nxt = _page_link(params, page + 1) if page < last_page else None
+    others: dict[str, str] = {}
+    for p in range(1, last_page + 1):
+        if p != page:
+            others[str(p)] = _page_link(params, p)
     return Pagination(
-        current=(start // num) + 1,
-        next=str(next_start),
-        next_link=f"/search?{urlencode(next_params)}",
+        current=page,
+        next=nxt,
+        other_pages=others or None,
     )
 
 
 def build_response(
     *,
-    items: list[ParsedItem],
+    page_items: list[ParsedItem],
+    top_stories: list[ParsedItem],
     params: SearchParameters,
     metadata: SearchMetadata,
+    info: SearchInformation,
+    page: int,
+    page_size: int,
+    total: int,
 ) -> NewsResponse:
-    results = to_news_results(items, params.start or 0)
+    start = (page - 1) * page_size
     return NewsResponse(
         search_metadata=metadata,
         search_parameters=params,
-        news_results=results,
-        serpapi_pagination=_pagination(params, len(results)),
+        search_information=info,
+        organic_results=to_organic_results(page_items, start),
+        top_stories=to_top_stories(top_stories),
+        pagination=build_pagination(params, page, total, page_size),
     )
